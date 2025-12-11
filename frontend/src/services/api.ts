@@ -245,6 +245,15 @@ export async function updateLender(id: string, data: Partial<Lender>): Promise<L
   return handleResponse<Lender>(response);
 }
 
+export async function deleteLender(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/lenders/${id}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error('Failed to delete lender');
+  }
+}
+
 // Programs
 
 export async function createProgram(lenderId: string, data: Partial<LenderProgram>): Promise<LenderProgram> {
@@ -297,4 +306,48 @@ export async function deleteRule(ruleId: string): Promise<void> {
 export async function getRuleTypes(): Promise<string[]> {
   const response = await fetch(`${API_BASE_URL}/lenders/rule-types`);
   return handleResponse<string[]>(response);
+}
+
+// PDF Parsing
+
+export interface ExtractedRule {
+  rule_type: string;
+  operator: string;
+  value: any;
+  is_required: boolean;
+  rejection_message: string;
+  weight?: number;
+}
+
+export interface ExtractedProgram {
+  name: string;
+  description?: string;
+  credit_tier?: string;
+  min_loan_amount?: number;
+  max_loan_amount?: number;
+  rules: ExtractedRule[];
+}
+
+export interface ExtractedLenderData {
+  lender_name: string;
+  programs: ExtractedProgram[];
+}
+
+export interface PdfParseResult {
+  success: boolean;
+  filename: string;
+  page_count: number;
+  extracted: ExtractedLenderData;
+  raw_text_preview: string;
+}
+
+export async function parsePdf(file: File): Promise<PdfParseResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(`${API_BASE_URL}/lenders/parse-pdf`, {
+    method: 'POST',
+    body: formData,
+  });
+  return handleResponse<PdfParseResult>(response);
 }

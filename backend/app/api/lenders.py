@@ -3,7 +3,7 @@ Lenders API - CRUD operations for lenders and their programs
 """
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -13,6 +13,7 @@ from app.schemas import (
     LenderProgramCreate, LenderProgramUpdate, LenderProgramResponse,
     PolicyRuleCreate, PolicyRuleUpdate, PolicyRuleResponse
 )
+from app.config import get_settings
 
 router = APIRouter(prefix="/api/lenders", tags=["lenders"])
 
@@ -26,6 +27,59 @@ def get_rule_types():
     """
     from app.engine import EVALUATOR_REGISTRY
     return list(EVALUATOR_REGISTRY.keys())
+
+
+@router.post("/parse-pdf")
+async def parse_pdf_guidelines(file: UploadFile = File(...)):
+    """
+    Parse a lender guideline PDF and extract rules using AI.
+    
+    Returns extracted lender data with programs and rules that can be
+    reviewed and used to create a new lender.
+    """
+    from app.services.pdf_parser import parse_pdf
+    from app.services.rule_extractor import extract_rules_from_text
+    
+    settings = get_settings()
+    
+    # Validate file type
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only PDF files are accepted"
+        )
+    
+    # Check API key
+    if not settings.gemini_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI service not configured. Set GEMINI_API_KEY in environment."
+        )
+    
+    try:
+        # Read and parse PDF
+        pdf_bytes = await file.read()
+        pdf_data = parse_pdf(pdf_bytes)
+        
+        # Extract rules using AI
+        extracted = await extract_rules_from_text(
+            pdf_data["text"], 
+            settings.gemini_api_key
+        )
+        
+        return {
+            "success": True,
+            "filename": file.filename,
+            "page_count": pdf_data["page_count"],
+            "extracted": extracted,
+            "raw_text_preview": pdf_data["text"][:2000] if pdf_data["text"] else ""
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to parse PDF: {str(e)}"
+        )
 
 
 # ============== Lender Endpoints ==============
@@ -179,8 +233,10 @@ def delete_lender(
     db: Session = Depends(get_db)
 ):
     """
-    Delete a lender (cascades to programs and rules).
+    Delete a lender (cascades to programs, rules, and related match results).
     """
+    from app.models import MatchResult
+    
     lender = db.query(Lender).filter(Lender.id == lender_id).first()
     
     if not lender:
@@ -188,6 +244,9 @@ def delete_lender(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Lender {lender_id} not found"
         )
+    
+    # Delete associated match results first (they reference lender_id)
+    db.query(MatchResult).filter(MatchResult.lender_id == lender_id).delete()
     
     db.delete(lender)
     db.commit()

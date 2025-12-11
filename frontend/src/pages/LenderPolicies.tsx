@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
     getLenders, getLender, updateRule, createRule, deleteRule, getRuleTypes,
-    LenderSummary, Lender, PolicyRule
+    parsePdf, createLender, deleteLender,
+    LenderSummary, Lender, PolicyRule, PdfParseResult, ExtractedLenderData
 } from '../services/api';
 
 function RuleEditor({
@@ -302,6 +303,13 @@ export function LenderPolicies() {
     const [ruleTypes, setRuleTypes] = useState<string[]>([]);
     const [error, setError] = useState<string | null>(null);
 
+    // PDF Import state
+    const [showImportModal, setShowImportModal] = useState(false);
+    const [importing, setImporting] = useState(false);
+    const [importResult, setImportResult] = useState<PdfParseResult | null>(null);
+    const [editableExtracted, setEditableExtracted] = useState<ExtractedLenderData | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
     const fetchLenders = async () => {
         try {
             const data = await getLenders();
@@ -340,6 +348,82 @@ export function LenderPolicies() {
         }
     };
 
+    const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setImporting(true);
+        setError(null);
+        setImportResult(null);
+
+        try {
+            const result = await parsePdf(file);
+            setImportResult(result);
+            setEditableExtracted(JSON.parse(JSON.stringify(result.extracted))); // Deep copy for editing
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to parse PDF');
+        } finally {
+            setImporting(false);
+            if (fileInputRef.current) fileInputRef.current.value = '';
+        }
+    };
+
+    const handleCreateFromImport = async () => {
+        if (!editableExtracted) return;
+
+        setImporting(true);
+        try {
+            const data = editableExtracted;
+            // Use any type since backend accepts partial program/rule data
+            await createLender({
+                name: data.lender_name,
+                is_active: true,
+                programs: data.programs.map((p, idx) => ({
+                    name: p.name || `Program ${idx + 1}`,
+                    description: p.description,
+                    credit_tier: p.credit_tier,
+                    min_loan_amount: p.min_loan_amount,
+                    max_loan_amount: p.max_loan_amount,
+                    is_active: true,
+                    priority: idx + 1,
+                    rules: p.rules.map((r, rIdx) => ({
+                        rule_type: r.rule_type,
+                        operator: r.operator,
+                        value: r.value,
+                        is_required: r.is_required,
+                        rejection_message: r.rejection_message,
+                        weight: r.weight || 10,
+                        priority: rIdx + 1,
+                        is_active: true,
+                    }))
+                }))
+            } as any);
+            await fetchLenders();
+            setShowImportModal(false);
+            setImportResult(null);
+            setEditableExtracted(null);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to create lender');
+        } finally {
+            setImporting(false);
+        }
+    };
+
+    const handleDeleteLender = async (lenderId: string, lenderName: string) => {
+        if (!confirm(`Delete "${lenderName}"? This will also delete all associated programs, rules, and match results.`)) {
+            return;
+        }
+        try {
+            await deleteLender(lenderId);
+            await fetchLenders();
+            if (selectedLender?.id === lenderId) {
+                setSelectedLender(null);
+            }
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Failed to delete lender');
+        }
+    };
+
     if (loading) {
         return (
             <div className="loading">
@@ -354,9 +438,153 @@ export function LenderPolicies() {
 
     return (
         <div>
-            <div className="section-header">
+            <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h1>Lender Policies</h1>
+                <button
+                    className="btn btn-primary"
+                    onClick={() => setShowImportModal(true)}
+                >
+                    📄 Import from PDF
+                </button>
             </div>
+
+            {/* PDF Import Modal */}
+            {showImportModal && (
+                <div style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center',
+                    justifyContent: 'center', zIndex: 1000
+                }}>
+                    <div className="card" style={{ width: '800px', maxHeight: '90vh', overflow: 'auto' }}>
+                        <div className="card-header">
+                            <h2>Import Lender from PDF</h2>
+                            <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => { setShowImportModal(false); setImportResult(null); }}
+                            >
+                                ✕
+                            </button>
+                        </div>
+
+                        {!importResult ? (
+                            <div style={{ padding: '2rem', textAlign: 'center' }}>
+                                <p style={{ marginBottom: '1.5rem', color: 'var(--text-secondary)' }}>
+                                    Upload a lender guideline PDF to automatically extract credit policies using AI.
+                                </p>
+                                <input
+                                    type="file"
+                                    ref={fileInputRef}
+                                    accept=".pdf"
+                                    onChange={handleFileSelect}
+                                    style={{ display: 'none' }}
+                                />
+                                <button
+                                    className="btn btn-primary btn-lg"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={importing}
+                                >
+                                    {importing ? (
+                                        <><span className="spinner" style={{ width: 16, height: 16 }}></span> Analyzing PDF...</>
+                                    ) : (
+                                        '📁 Select PDF File'
+                                    )}
+                                </button>
+                            </div>
+                        ) : (
+                            <div style={{ padding: '1rem' }}>
+                                <div className="alert alert-success" style={{ marginBottom: '1rem' }}>
+                                    ✅ Extracted from {importResult.filename} ({importResult.page_count} pages)
+                                </div>
+
+                                <h3>
+                                    Lender:
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        value={editableExtracted?.lender_name || ''}
+                                        onChange={(e) => setEditableExtracted(prev => prev ? { ...prev, lender_name: e.target.value } : null)}
+                                        style={{ marginLeft: '0.5rem', display: 'inline', width: 'auto', minWidth: '200px' }}
+                                    />
+                                </h3>
+
+                                {editableExtracted?.programs.map((program, pIdx) => (
+                                    <div key={pIdx} className="card" style={{ marginTop: '1rem', background: 'var(--bg-tertiary)' }}>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            value={program.name}
+                                            onChange={(e) => {
+                                                const updated = { ...editableExtracted };
+                                                updated.programs[pIdx].name = e.target.value;
+                                                setEditableExtracted(updated);
+                                            }}
+                                            style={{ fontWeight: 600, marginBottom: '0.5rem' }}
+                                        />
+                                        {program.description && <p style={{ color: 'var(--text-secondary)' }}>{program.description}</p>}
+                                        <div style={{ fontSize: '0.875rem', marginBottom: '0.5rem' }}>
+                                            {program.credit_tier && <span className="badge badge-primary">{program.credit_tier}</span>}
+                                            {program.min_loan_amount && <span> Min: ${program.min_loan_amount.toLocaleString()}</span>}
+                                            {program.max_loan_amount && <span> Max: ${program.max_loan_amount.toLocaleString()}</span>}
+                                        </div>
+                                        <strong>{program.rules.length} rules extracted:</strong>
+                                        <ul style={{ marginTop: '0.5rem', fontSize: '0.875rem' }}>
+                                            {program.rules.map((rule, rIdx) => (
+                                                <li key={rIdx} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.25rem' }}>
+                                                    <code>{rule.rule_type}</code> {rule.operator}
+                                                    <input
+                                                        type="text"
+                                                        className="form-input"
+                                                        value={JSON.stringify(rule.value)}
+                                                        onChange={(e) => {
+                                                            try {
+                                                                const updated = { ...editableExtracted };
+                                                                updated.programs[pIdx].rules[rIdx].value = JSON.parse(e.target.value);
+                                                                setEditableExtracted(updated);
+                                                            } catch { }
+                                                        }}
+                                                        style={{ width: '80px', display: 'inline' }}
+                                                    />
+                                                    {rule.is_required ? <span className="badge badge-danger">Required</span> : null}
+                                                    <button
+                                                        className="btn btn-sm btn-danger"
+                                                        onClick={() => {
+                                                            const updated = { ...editableExtracted };
+                                                            updated.programs[pIdx].rules.splice(rIdx, 1);
+                                                            setEditableExtracted(updated);
+                                                        }}
+                                                        style={{ padding: '0.125rem 0.5rem', fontSize: '0.75rem' }}
+                                                    >
+                                                        ×
+                                                    </button>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                ))}
+
+                                <div style={{ marginTop: '1.5rem', display: 'flex', gap: '1rem' }}>
+                                    <button
+                                        className="btn btn-success"
+                                        onClick={handleCreateFromImport}
+                                        disabled={importing}
+                                    >
+                                        {importing ? 'Creating...' : '✓ Create Lender'}
+                                    </button>
+                                    <button
+                                        className="btn btn-secondary"
+                                        onClick={() => setImportResult(null)}
+                                    >
+                                        ← Upload Different PDF
+                                    </button>
+                                </div>
+                                <p style={{ marginTop: '1rem', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                                    💡 You can edit the lender name, program names, and rule values above before creating.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
 
             <div style={{ display: 'grid', gridTemplateColumns: '300px 1fr', gap: '1.5rem' }}>
                 {/* Lender list */}
@@ -409,6 +637,13 @@ export function LenderPolicies() {
                                 <span className={`badge ${selectedLender.is_active ? 'badge-success' : 'badge-danger'}`}>
                                     {selectedLender.is_active ? 'Active' : 'Inactive'}
                                 </span>
+                                <button
+                                    className="btn btn-danger btn-sm"
+                                    onClick={() => handleDeleteLender(selectedLender.id, selectedLender.name)}
+                                    style={{ marginLeft: '0.5rem' }}
+                                >
+                                    🗑️ Delete
+                                </button>
                             </div>
 
                             {/* Contact info */}
