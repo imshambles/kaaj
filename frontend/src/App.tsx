@@ -7,7 +7,7 @@ import './index.css';
 
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename="/kaaj">
       <div className="app">
         <nav className="navbar">
           <div className="container navbar-content">
